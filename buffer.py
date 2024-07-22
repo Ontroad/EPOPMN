@@ -1,3 +1,6 @@
+"""Implementation of replay buffer in EPO-PMN algorithm, which is based on the omnisafe repository."""
+
+
 import time
 from typing import Dict, Tuple, Optional, Union
 import torch
@@ -30,8 +33,7 @@ from scipy.stats import norm
 
 
 
-# buffer class
-class MineOnPolicyBuffer(OnPolicyBuffer):
+class EPOOnPolicyBuffer(OnPolicyBuffer):
     def __init__(  # pylint: disable=too-many-arguments
         self,
         obs_space: OmnisafeSpace,
@@ -180,7 +182,7 @@ class MineOnPolicyBuffer(OnPolicyBuffer):
         return adv_cs, target_cs
 
 
-class MineVectorOnPolicyBuffer(VectorOnPolicyBuffer):
+class EPOVectorOnPolicyBuffer(VectorOnPolicyBuffer):
     def __init__(  # pylint: disable=super-init-not-called,too-many-arguments
         self,
         obs_space: OmnisafeSpace,
@@ -202,7 +204,7 @@ class MineVectorOnPolicyBuffer(VectorOnPolicyBuffer):
         if num_envs < 1:
             raise ValueError('num_envs must be greater than 0.')
         self.buffers = [
-            MineOnPolicyBuffer(
+            EPOOnPolicyBuffer(
                 obs_space=obs_space,
                 act_space=act_space,
                 size=size,
