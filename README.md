@@ -14,7 +14,7 @@ Install: ```conda env create -f epopmn.yaml```
 
 # Run Experiments
 
-Register the EPO algorithm into the omnisafe library
+Register the EPO algorithm into the omnisafe library.
 
 Activate conda env: ```source activate epopmn```
 
