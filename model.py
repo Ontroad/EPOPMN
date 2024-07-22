@@ -1,5 +1,4 @@
-"""Implementation of policy adapter in EPO-PMN algorithm, which is based on the omnisafe repository."""
-
+"""Implementation of actor and critic models in EPO-PMN algorithm, which is based on the omnisafe repository."""
 
 import time
 from typing import Dict, Tuple, Optional, Union
@@ -30,114 +29,48 @@ from omnisafe.models.actor_critic.actor_critic import ActorCritic
 from omnisafe.utils.config import ModelConfig
 import torch.nn as nn
 from scipy.stats import norm
-from EPOPMN.model import EPOConstraintActorCritic
-from EPOPMN.buffer import EPOVectorOnPolicyBuffer
 
 
-class EPOOnPolicyAdapter(OnPolicyAdapter):
-    def __init__(self, env_id: str, num_envs: int, seed: int, cfgs: Config):
-        super().__init__(env_id, num_envs, seed, cfgs)
-        self._discount_cost: torch.Tensor
-
-    def roll_out(  # pylint: disable=too-many-locals
+class EPOConstraintActorCritic(ConstraintActorCritic):
+    def __init__(
         self,
-        steps_per_epoch: int,
-        agent: EPOConstraintActorCritic,
-        buffer: EPOVectorOnPolicyBuffer,
-        logger: Logger,
+        obs_space: OmnisafeSpace,
+        act_space: OmnisafeSpace,
+        model_cfgs: ModelConfig,
+        epochs: int,
     ) -> None:
-        """Roll out the environment and store the data in the buffer."""
-        self._reset_log()
+        """Initialize ConstraintActorCritic."""
+        super().__init__(obs_space, act_space, model_cfgs, epochs)
 
-        obs, _ = self.reset()
-        for step in track(
-            range(steps_per_epoch),
-            description=f'Processing rollout for epoch: {logger.current_epoch}...',
-        ):
-            act, value_r, value_c, value_cs, logp = agent.step(obs)  
-            next_obs, reward, cost, terminated, truncated, info = self.step(act)  
+        self.quadratic_cost_critic = CriticBuilder(
+            obs_space=obs_space,
+            act_space=act_space,
+            hidden_sizes=model_cfgs.critic.hidden_sizes,
+            activation=model_cfgs.critic.activation,
+            weight_initialization_mode=model_cfgs.weight_initialization_mode,
+            num_critics=1,
+            use_obs_encoder=False,
+        ).build_critic('v')
+        self.quadratic_cost_critic.add_module('softplus', nn.Softplus())
+        self.add_module('quadratic_cost_critic', self.quadratic_cost_critic)
 
-            self._log_value(reward=reward, cost=cost, info=info)  
+        if model_cfgs.critic.lr != 'None':
+            self.quadratic_cost_critic_optimizer = optim.Adam(
+                self.quadratic_cost_critic.parameters(), lr=model_cfgs.critic.lr
+            )
 
-            if self._cfgs.algo_cfgs.use_cost:
-                logger.store(**{'Value/cost': value_c})
-            logger.store(**{'Value/reward': value_r})
+    def step(self, obs: torch.Tensor, deterministic: bool = False) -> Tuple[torch.Tensor, ...]:
+        """Choose action based on observation."""
+        with torch.no_grad():
+            value_r = self.reward_critic(obs)
+            value_c = self.cost_critic(obs)
+            value_cs = self.quadratic_cost_critic(obs)
 
-            buffer.store(
-                obs=obs,
-                act=act,
-                reward=reward,
-                cost=cost,
-                value_r=value_r,
-                value_c=value_c,
-                value_cs=value_cs,
-                logp=logp,
-                time_step=self._ep_len - 1,
-            )  
+            action = self.actor.predict(obs, deterministic=deterministic)
+            log_prob = self.actor.log_prob(action)
 
-            obs = next_obs
-            epoch_end = step >= steps_per_epoch - 1 
-            for idx, (done, time_out) in enumerate(zip(terminated, truncated)):  
-                if epoch_end or done or time_out:
-                    if not done:
-                        if epoch_end: 
-                            logger.log(
-                                f'Warning: trajectory cut off when rollout by epoch at {self._ep_len[idx]} steps.'
-                            )
-                            _, last_value_r, last_value_c, last_value_cs, _ = agent.step(obs[idx])
-                        if time_out:  
-                            _, last_value_r, last_value_c, last_value_cs, _ = agent.step(
-                                info['final_observation'][idx]
-                            )
-                        last_value_r = last_value_r.unsqueeze(0)  
-                        last_value_c = last_value_c.unsqueeze(0)
-                        last_value_cs = last_value_cs.unsqueeze(0)
-                    else:  
-                        last_value_r = torch.zeros(1)
-                        last_value_c = torch.zeros(1)
-                        last_value_cs = torch.zeros(1)
+        return action, value_r[0], value_c[0], value_cs[0], log_prob
 
-                    if done or time_out:  
-                        self._log_metrics(
-                            logger, idx
-                        )  
-                        self._reset_log(idx)  
-
-                        self._ep_ret[idx] = 0.0
-                        self._ep_cost[idx] = 0.0
-                        self._ep_len[idx] = 0.0
-                        self._ep_len[idx] = 0.0
-
-                    buffer.finish_path(
-                        last_value_r, last_value_c, last_value_cs, idx
-                    )  
-
-    def _log_value(
-        self,
-        reward: torch.Tensor,
-        cost: torch.Tensor,
-        info: Dict,
-        **kwargs,  # pylint: disable=unused-argument
-    ) -> None:
-        """Log value."""
-        self._ep_ret += info.get(
-            'original_reward', reward
-        ).cpu() 
-        self._ep_cost += info.get('original_cost', cost).cpu()
-        self._discount_cost += (
-            info.get('original_cost', cost).cpu() * self._cfgs.algo_cfgs.cost_gamma**self._ep_len
-        )
-        self._ep_len += 1
-
-    def _reset_log(self, idx: Optional[int] = None) -> None:
-        """Reset log."""
-        if idx is None:
-            self._ep_ret = torch.zeros(self._env.num_envs)
-            self._ep_cost = torch.zeros(self._env.num_envs)
-            self._discount_cost = torch.zeros(self._env.num_envs)
-            self._ep_len = torch.zeros(self._env.num_envs)
-        else:
-            self._ep_ret[idx] = 0.0
-            self._ep_cost[idx] = 0.0
-            self._discount_cost = 0.0
-            self._ep_len[idx] = 0.0
+    def forward(self, obs: torch.Tensor, deterministic: bool = False) -> Tuple[torch.Tensor, ...]:
+        """Choose action based on observation."""
+        return self.step(obs, deterministic=deterministic)
